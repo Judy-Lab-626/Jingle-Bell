@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f6f2">
+  <title>Little Moments · 照片墙</title>
+  <meta name="description" content="一面持续更新的个人照片墙。">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="回到照片墙首页">
+      <span class="brand-mark">✳</span>
+      <span>
+        <strong id="site-title">Little Moments</strong>
+        <small id="site-subtitle">A visual diary</small>
+      </span>
+    </a>
+    <div class="toolbar">
+      <span id="photo-count" class="photo-count"></span>
+      <button id="shuffle-button" class="quiet-button" type="button" title="打乱顺序">↻ <span>随机</span></button>
+      <button id="slideshow-button" class="primary-button" type="button">▶ 全屏播放</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <p class="eyebrow">A COLLECTION OF MOMENTS</p>
+      <h1>生活值得被好好收藏。</h1>
+      <p class="intro-copy">一些风景、日常，以及不想忘记的瞬间。</p>
+    </section>
+
+    <section id="gallery" class="gallery" aria-label="照片墙">
+      <div class="loading">正在整理照片……</div>
+    </section>
+    <p id="empty-state" class="empty-state" hidden>
+      还没有照片。可以在 <code>photos.js</code> 中添加图片链接。
+    </p>
+  </main>
+
+  <footer>
+    <span>Little Moments</span>
+    <span>Made of memories · <span id="year"></span></span>
+  </footer>
+
+  <dialog id="lightbox" class="lightbox">
+    <button id="close-lightbox" class="close-button" aria-label="关闭" type="button">×</button>
+    <button id="previous-photo" class="nav-button prev" aria-label="上一张" type="button">‹</button>
+    <figure>
+      <img id="lightbox-image" alt="">
+      <figcaption>
+        <strong id="lightbox-title"></strong>
+        <span id="lightbox-meta"></span>
+      </figcaption>
+    </figure>
+    <button id="next-photo" class="nav-button next" aria-label="下一张" type="button">›</button>
+    <div id="slideshow-hint" class="slideshow-hint" hidden>自动播放中 · 点击暂停 / 继续</div>
+  </dialog>
+
+  <script src="photos.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
