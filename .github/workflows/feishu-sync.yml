@@ -5,19 +5,30 @@ on:
   schedule:
     - cron: "17,47 * * * *"
 
+permissions:
+  contents: write
+
 jobs:
-  test-image-download:
+  sync-photos:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test downloading one Feishu image
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Sync Feishu photos
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           python3 - <<'PY'
-          import json
           import os
+          import json
+          import time
+          import hashlib
+          import mimetypes
           import urllib.request
           import urllib.parse
           import urllib.error
@@ -25,6 +36,9 @@ jobs:
           APP_ID = os.environ["FEISHU_APP_ID"]
           APP_SECRET = os.environ["FEISHU_APP_SECRET"]
           NODE_TOKEN = "MNwRw7oGAifvY0kDkhzcgOTzngd"
+
+          IMAGE_DIR = "assets/feishu"
+          PHOTOS_JS = "photos.js"
 
           def request(url, token=None, method="GET", payload=None):
               headers = {}
@@ -44,14 +58,20 @@ jobs:
                   method=method
               )
 
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  return response.read(), response.headers
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as response:
+                      return response.read(), response.headers
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(
+                      f"HTTP {exc.code}: {detail[:1000]}"
+                  ) from exc
 
           def get_json(url, token=None, method="GET", payload=None):
               raw, _ = request(url, token, method, payload)
               return json.loads(raw.decode("utf-8"))
 
-          # 1. Authenticate with Feishu
+          # 1. Authenticate
           auth = get_json(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               method="POST",
@@ -70,7 +90,7 @@ jobs:
           token = auth["tenant_access_token"]
           print("SUCCESS: Feishu authentication.")
 
-          # 2. Resolve the Wiki node to a document
+          # 2. Resolve the Wiki node
           node_url = (
               "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?"
               + urllib.parse.urlencode({"token": NODE_TOKEN})
@@ -92,9 +112,10 @@ jobs:
 
           print("SUCCESS: Document identified.")
 
-          # 3. Find the first image block
+          # 3. Collect all image tokens from every page
+          image_tokens = []
+          seen_tokens = set()
           page_token = None
-          image_token = None
 
           while True:
               params = {"page_size": 500}
@@ -120,15 +141,14 @@ jobs:
               data = result.get("data", {})
 
               for block in data.get("items", []):
-                  if block.get("block_type") == 27:
-                      candidate = block.get("image", {}).get("token")
+                  if block.get("block_type") != 27:
+                      continue
 
-                      if candidate:
-                          image_token = candidate
-                          break
+                  image_token = block.get("image", {}).get("token")
 
-              if image_token:
-                  break
+                  if image_token and image_token not in seen_tokens:
+                      seen_tokens.add(image_token)
+                      image_tokens.append(image_token)
 
               if not data.get("has_more"):
                   break
@@ -138,51 +158,109 @@ jobs:
               if not page_token:
                   raise RuntimeError("Missing pagination token.")
 
-          if not image_token:
-              raise RuntimeError("No image resource token found.")
+          if not image_tokens:
+              raise RuntimeError("No image resources found.")
 
-          print("SUCCESS: Found an image resource token.")
-          print("Testing image resource download API.")
+          print(f"Found {len(image_tokens)} unique images.")
 
-          # 4. Test the media download endpoint
-          download_url = (
-              "https://open.feishu.cn/open-apis/drive/v1/medias/"
-              + urllib.parse.quote(image_token, safe="")
-              + "/download"
-          )
+          # 4. Create the destination directory
+          os.makedirs(IMAGE_DIR, exist_ok=True)
 
-          try:
+          expected_files = set()
+          photo_entries = []
+
+          # 5. Download each image into the website repository
+          for index, image_token in enumerate(image_tokens, start=1):
+              short_hash = hashlib.sha256(
+                  image_token.encode("utf-8")
+              ).hexdigest()[:20]
+
+              download_url = (
+                  "https://open.feishu.cn/open-apis/drive/v1/medias/"
+                  + urllib.parse.quote(image_token, safe="")
+                  + "/download"
+              )
+
+              # Download sequentially to avoid excessive API concurrency.
+              time.sleep(0.3)
+
               image_bytes, headers = request(download_url, token)
-
-              content_type = headers.get("Content-Type", "")
-              print("Download response content type:", content_type)
-              print("Downloaded bytes:", len(image_bytes))
+              content_type = headers.get(
+                  "Content-Type", ""
+              ).split(";")[0].strip().lower()
 
               if not image_bytes:
-                  raise RuntimeError("The download response was empty.")
-
-              if "json" in content_type.lower():
-                  print(
-                      image_bytes[:1000].decode(
-                          "utf-8",
-                          errors="replace"
-                      )
-                  )
                   raise RuntimeError(
-                      "API returned JSON rather than image data."
+                      f"Image {index} returned empty content."
                   )
 
-              print("SUCCESS: Image download test completed.")
+              if "json" in content_type or image_bytes.startswith(b"{"):
+                  raise RuntimeError(
+                      f"Image {index} returned JSON instead of image data."
+                  )
 
-          except urllib.error.HTTPError as exc:
-              print("HTTP status:", exc.code)
-              print("Feishu error response:")
+              extension = mimetypes.guess_extension(content_type) or ".jpg"
+
+              # Normalize common image extensions.
+              if extension == ".jpe":
+                  extension = ".jpg"
+
+              filename = f"photo_{short_hash}{extension}"
+              filepath = os.path.join(IMAGE_DIR, filename)
+
+              with open(filepath, "wb") as image_file:
+                  image_file.write(image_bytes)
+
+              expected_files.add(filename)
+
+              photo_entries.append({
+                  "src": f"{IMAGE_DIR}/{filename}",
+                  "title": f"Photo {index}",
+                  "location": "",
+                  "alt": f"Photo {index}"
+              })
+
               print(
-                  exc.read().decode("utf-8", errors="replace")[:2000]
+                  f"Synced image {index}/{len(image_tokens)} "
+                  f"({len(image_bytes)} bytes)"
               )
-              raise
 
-          except Exception as exc:
-              print("Image download test failed:", str(exc))
-              raise
+          # 6. Remove files for images no longer in the document
+          for filename in os.listdir(IMAGE_DIR):
+              filepath = os.path.join(IMAGE_DIR, filename)
+
+              if os.path.isfile(filepath) and filename not in expected_files:
+                  os.remove(filepath)
+
+          # 7. Generate the photo list used by the existing website
+          with open(PHOTOS_JS, "w", encoding="utf-8") as output:
+              output.write(
+                  "/* Automatically generated by Feishu Photo Sync. */\n"
+              )
+              output.write("window.PHOTOS = ")
+              json.dump(
+                  photo_entries,
+                  output,
+                  ensure_ascii=False,
+                  indent=2
+              )
+              output.write(";\n")
+
+          print(f"SUCCESS: Generated {len(photo_entries)} photo entries.")
+          print("SUCCESS: Photo synchronization completed.")
           PY
+
+      - name: Commit and push website updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add photos.js assets/feishu
+
+          if git diff --cached --quiet; then
+            echo "No photo changes detected."
+          else
+            git commit -m "Sync photos from Feishu"
+            git push
+            echo "Photo updates pushed to GitHub."
+          fi
