@@ -145,7 +145,7 @@ jobs:
               print("Feishu error response:")
               print(exc.read().decode("utf-8", errors="replace")[:2000])
               raise
-          except Exception as exc:
+              except Exception as exc:
               print("Image download test failed:", str(exc))
               raise
           PY
