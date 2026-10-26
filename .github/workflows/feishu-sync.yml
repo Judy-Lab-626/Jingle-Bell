@@ -6,11 +6,11 @@ on:
     - cron: "17,47 * * * *"
 
 jobs:
-  scan-images:
+  test-image-download:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Scan all image blocks in Feishu document
+      - name: Test downloading one Feishu image
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
@@ -25,7 +25,7 @@ jobs:
           APP_SECRET = os.environ["FEISHU_APP_SECRET"]
           NODE_TOKEN = "MNwRw7oGAifvY0kDkhzcgOTzngd"
 
-          def get_json(url, token=None, method="GET", payload=None):
+          def request(url, token=None, method="GET", payload=None):
               headers = {}
               data = None
               if token:
@@ -37,13 +37,14 @@ jobs:
                   url, data=data, headers=headers, method=method
               )
               with urllib.request.urlopen(req, timeout=30) as response:
-                  return json.loads(response.read().decode("utf-8"))
+                  return response.read(), response.headers
 
-          auth = get_json(
+          raw, _ = request(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               method="POST",
               payload={"app_id": APP_ID, "app_secret": APP_SECRET},
           )
+          auth = json.loads(raw.decode("utf-8"))
           if auth.get("code") != 0:
               raise RuntimeError(
                   f"Authentication failed: {auth.get('code')} {auth.get('msg')}"
@@ -56,7 +57,8 @@ jobs:
               "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?"
               + urllib.parse.urlencode({"token": NODE_TOKEN})
           )
-          node_result = get_json(node_url, token)
+          raw, _ = request(node_url, token)
+          node_result = json.loads(raw.decode("utf-8"))
           if node_result.get("code") != 0:
               raise RuntimeError(
                   f"Wiki node error: {node_result.get('code')} "
@@ -66,13 +68,12 @@ jobs:
           node = node_result.get("data", {}).get("node", {})
           doc_token = node.get("obj_token")
           if node.get("obj_type") != "docx" or not doc_token:
-              raise RuntimeError("Could not resolve the Feishu document.")
+              raise RuntimeError("Could not resolve the document.")
 
           print("SUCCESS: Document identified.")
 
-          all_images = []
           page_token = None
-          page_number = 0
+          image_token = None
 
           while True:
               params = {"page_size": 500}
@@ -85,7 +86,8 @@ jobs:
                   + "/blocks?"
                   + urllib.parse.urlencode(params)
               )
-              result = get_json(blocks_url, token)
+              raw, _ = request(blocks_url, token)
+              result = json.loads(raw.decode("utf-8"))
 
               if result.get("code") != 0:
                   raise RuntimeError(
@@ -94,35 +96,50 @@ jobs:
                   )
 
               data = result.get("data", {})
-              blocks = data.get("items", [])
-              page_number += 1
-
-              for block in blocks:
+              for block in data.get("items", []):
                   if block.get("block_type") == 27:
-                      image = block.get("image", {})
-                      token_id = image.get("token")
-                      if token_id:
-                          all_images.append(token_id)
+                      image_token = block.get("image", {}).get("token")
+                      if image_token:
+                          break
 
-              print(
-                  f"Scanned page {page_number}: "
-                  f"{len(blocks)} blocks, "
-                  f"{len(all_images)} image references found so far."
-              )
+              if image_token:
+                  break
 
               if not data.get("has_more"):
                   break
 
               page_token = data.get("page_token")
               if not page_token:
-                  raise RuntimeError(
-                      "API says more pages exist but returned no page token."
-                  )
+                  raise RuntimeError("Missing pagination token.")
 
-          unique_images = list(dict.fromkeys(all_images))
+          if not image_token:
+              raise RuntimeError("No image resource token found.")
 
-          print("SUCCESS: Finished scanning image blocks.")
-          print("Total image blocks:", len(all_images))
-          print("Unique image resources:", len(unique_images))
-          print("Image resource IDs are available:", bool(unique_images))
+          print("SUCCESS: Found an image resource token.")
+          print("Testing image resource download API.")
+
+          download_url = (
+              "https://open.feishu.cn/open-apis/drive/v1/medias/"
+              + urllib.parse.quote(image_token, safe="")
+              + "/download"
+          )
+
+          try:
+              image_bytes, headers = request(download_url, token)
+              content_type = headers.get("Content-Type", "")
+              print("Download response content type:", content_type)
+              print("Downloaded bytes:", len(image_bytes))
+
+              if not image_bytes:
+                  raise RuntimeError("The download response was empty.")
+
+              if "json" in content_type.lower():
+                  print("API returned JSON rather than image data.")
+                  print(image_bytes[:1000].decode("utf-8", errors="replace"))
+                  raise RuntimeError("Image download was not confirmed.")
+
+              print("SUCCESS: Image download test completed.")
+          except Exception as exc:
+              print("Image download test failed:", str(exc))
+              raise
           PY
