@@ -6,11 +6,11 @@ on:
     - cron: "17,47 * * * *"
 
 jobs:
-  test-feishu-api:
+  scan-images:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Read Feishu document blocks
+      - name: Scan all image blocks in Feishu document
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
@@ -19,51 +19,44 @@ jobs:
           import json
           import os
           import urllib.request
-          import urllib.error
+          import urllib.parse
 
           APP_ID = os.environ["FEISHU_APP_ID"]
           APP_SECRET = os.environ["FEISHU_APP_SECRET"]
           NODE_TOKEN = "MNwRw7oGAifvY0kDkhzcgOTzngd"
 
-          def request_json(url, method="GET", payload=None, token=None):
-              data = None
+          def get_json(url, token=None, method="GET", payload=None):
               headers = {}
+              data = None
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
               if payload is not None:
                   data = json.dumps(payload).encode("utf-8")
                   headers["Content-Type"] = "application/json; charset=utf-8"
-              if token:
-                  headers["Authorization"] = f"Bearer {token}"
               req = urllib.request.Request(
                   url, data=data, headers=headers, method=method
               )
-              try:
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      return json.loads(response.read().decode("utf-8"))
-              except urllib.error.HTTPError as e:
-                  print("HTTP error:", e.code)
-                  print(e.read().decode("utf-8")[:1500])
-                  raise
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
 
-          auth = request_json(
+          auth = get_json(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               method="POST",
               payload={"app_id": APP_ID, "app_secret": APP_SECRET},
           )
-
           if auth.get("code") != 0:
               raise RuntimeError(
-                  f"Token error: {auth.get('code')} {auth.get('msg')}"
+                  f"Authentication failed: {auth.get('code')} {auth.get('msg')}"
               )
 
           token = auth["tenant_access_token"]
-          print("SUCCESS: Access token obtained.")
+          print("SUCCESS: Feishu authentication.")
 
-          node_result = request_json(
-              "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node"
-              f"?token={NODE_TOKEN}",
-              token=token,
+          node_url = (
+              "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?"
+              + urllib.parse.urlencode({"token": NODE_TOKEN})
           )
-
+          node_result = get_json(node_url, token)
           if node_result.get("code") != 0:
               raise RuntimeError(
                   f"Wiki node error: {node_result.get('code')} "
@@ -71,57 +64,65 @@ jobs:
               )
 
           node = node_result.get("data", {}).get("node", {})
-          if node.get("obj_type") != "docx":
-              raise RuntimeError(
-                  f"Expected docx, got {node.get('obj_type')}"
-              )
-
           doc_token = node.get("obj_token")
-          if not doc_token:
-              raise RuntimeError("Document token is missing.")
+          if node.get("obj_type") != "docx" or not doc_token:
+              raise RuntimeError("Could not resolve the Feishu document.")
 
-          print("SUCCESS: Document node found.")
+          print("SUCCESS: Document identified.")
 
-          blocks_result = request_json(
-              "https://open.feishu.cn/open-apis/docx/v1/documents/"
-              f"{doc_token}/blocks?page_size=500",
-              token=token,
-          )
+          all_images = []
+          page_token = None
+          page_number = 0
 
-          if blocks_result.get("code") != 0:
-              raise RuntimeError(
-                  f"Document blocks error: {blocks_result.get('code')} "
-                  f"{blocks_result.get('msg')}"
+          while True:
+              params = {"page_size": 500}
+              if page_token:
+                  params["page_token"] = page_token
+
+              blocks_url = (
+                  "https://open.feishu.cn/open-apis/docx/v1/documents/"
+                  + urllib.parse.quote(doc_token, safe="")
+                  + "/blocks?"
+                  + urllib.parse.urlencode(params)
               )
+              result = get_json(blocks_url, token)
 
-          blocks = blocks_result.get("data", {}).get("items", [])
-          print("SUCCESS: Document blocks retrieved.")
-          print("Number of blocks:", len(blocks))
-
-          image_count = 0
-          text_parts = []
-
-          for block in blocks:
-              block_type = block.get("block_type")
-              if block_type == 27:
-                  image_count += 1
-                  print(
-                      "IMAGE BLOCK:",
-                      block.get("block_id"),
-                      json.dumps(block.get("image", {}), ensure_ascii=False)
+              if result.get("code") != 0:
+                  raise RuntimeError(
+                      f"Blocks API error: {result.get('code')} "
+                      f"{result.get('msg')}"
                   )
 
-              for value in block.values():
-                  if isinstance(value, dict) and "elements" in value:
-                      for element in value.get("elements", []):
-                          text_run = element.get("text_run", {})
-                          content = text_run.get("content")
-                          if content:
-                              text_parts.append(content)
+              data = result.get("data", {})
+              blocks = data.get("items", [])
+              page_number += 1
 
-          print("Image blocks found:", image_count)
-          print("Text preview:", "".join(text_parts)[:1000])
+              for block in blocks:
+                  if block.get("block_type") == 27:
+                      image = block.get("image", {})
+                      token_id = image.get("token")
+                      if token_id:
+                          all_images.append(token_id)
 
-          if blocks_result.get("data", {}).get("has_more"):
-              print("NOTE: More pages of blocks exist; pagination is needed.")
+              print(
+                  f"Scanned page {page_number}: "
+                  f"{len(blocks)} blocks, "
+                  f"{len(all_images)} image references found so far."
+              )
+
+              if not data.get("has_more"):
+                  break
+
+              page_token = data.get("page_token")
+              if not page_token:
+                  raise RuntimeError(
+                      "API says more pages exist but returned no page token."
+                  )
+
+          unique_images = list(dict.fromkeys(all_images))
+
+          print("SUCCESS: Finished scanning image blocks.")
+          print("Total image blocks:", len(all_images))
+          print("Unique image resources:", len(unique_images))
+          print("Image resource IDs are available:", bool(unique_images))
           PY
